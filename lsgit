@@ -104,6 +104,10 @@ function error {
 	echo -e "${ERROR}[ERROR]${NC} $@"
 }
 
+function error2 {
+	echo -e "        $@"
+}
+
 function success {
 	echo -e "${GREEN}$@${NC}"
 }
@@ -123,7 +127,8 @@ if [[ "$(git rev-parse --git-dir 2> /dev/null)" != ".git" ]]; then
 fi
 
 if [[ "$COMMAND" == "default" ]]; then
-	error "Argument COMMAND can not be empty. Run '$(basename $0) --help' for a list of options."
+	error "Argument COMMAND can not be empty."
+	error2 "Run '$(basename $0) --help' for a list of options."
 	exit 1
 fi
 
@@ -186,7 +191,7 @@ function require_branch_name {
 function forbid_branch_name_arg {
 	if [[ "$BRANCH_NAME" != "default" ]]; then
 		error "Unsupported third argument. The command 'end' runs on the current branch."
-		error "The third argument sent was: '$BRANCH_NAME'."
+		error2 "The third argument sent was: '$BRANCH_NAME'."
 		exit 1
 	fi
 }
@@ -201,7 +206,7 @@ function require_feature_branch {
 function require_spaceless_branch_name {
 	if [[ "$EXTRA_ARG" != "default" ]]; then
 		error "Unsupported fourth argument. Spaces are not allowed in BRANCH_NAME."
-		error "The fourth argument sent was: '$EXTRA_ARG'."
+		error2 "The fourth argument sent was: '$EXTRA_ARG'."
 		exit 1
 	fi
 }
@@ -209,7 +214,7 @@ function require_spaceless_branch_name {
 function require_slashless_branch_name {
 	if [[ "$BRANCH_NAME" == *"/"* ]]; then
 		error "Invalid BRANCH_NAME. Slashes are not allowed."
-		error "$@"
+		error2 "$@"
 		exit 1
 	fi
 }
@@ -318,7 +323,7 @@ fi
 
 if [[ "$COMMAND" == "start" ]] && [[ "$CURR_BRANCH_TYPE" == "subfeature" ]]; then
 	error "Subfeatures can not be started from another subfeature."
-	error "Current branch is '$CURR_BRANCH_NAME'."
+	error2 "Current branch is '$CURR_BRANCH_NAME'."
 	exit 1
 fi
 

@@ -1,0 +1,330 @@
+#!/bin/bash
+
+# https://stackoverflow.com/a/29754866/3622350
+# saner programming env: these switches turn some bugs into errors
+set -o errexit -o pipefail -o noclobber -o nounset
+
+# -allow a command to fail with !'s side effect on errexit
+# -use return value from ${PIPESTATUS[0]}, because ! hosed $?
+! getopt --test > /dev/null 
+if [[ ${PIPESTATUS[0]} -ne 4 ]]; then
+    echo 'Sorry, `getopt --test` failed in this environment.'
+    exit 1
+fi
+
+# https://wiki.bash-hackers.org/howto/getopts_tutorial#the_option-string
+OPTIONS=:ldhv
+LONGOPTS=:local,debug,help,version
+
+# -regarding ! and PIPESTATUS see above
+# -temporarily store output to be able to check for errors
+# -activate quoting/enhanced mode (e.g. by writing out "--options")
+# -pass arguments only via   -- "$@"   to separate them correctly
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    # e.g. return value is 1
+    #  then getopt has complained about wrong arguments to stdout
+    exit 2
+fi
+# read getopt's output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+LOCAL_OPS_ONLY='false'
+DEBUG='false'
+VERSION="v0.1.0"
+HELP="
+Usage: $(basename $0) [OPTION] [COMMAND] [<branch name>]
+   or: $(basename $0) [OPTION] [COMMAND]
+   or: $(basename $0) [OPTION]
+
+$(basename $0) $VERSION
+
+Options:
+  -l, --local                  Run local operations only
+  -d, --debug                  Show debug information
+  -h, --help                   Display this help and exit
+  -v, --version                Output version information and exit
+
+Commands:
+  start [branch name]          Create and checkout to a new feature or
+                                 subfeature branch
+  end                          Merge the current branch to its parent
+                                 branch and delete it
+  update                       Bring changes from the default branch to
+                                 the current one. If the current
+                                 branch is a subfeature, changes will
+                                 be merged from default to the feature
+                                 and THEN to the subfeature
+
+"
+
+while true; do
+    case "$1" in
+        -l|--local)
+            LOCAL_OPS_ONLY='true'
+			# info about shift: https://unix.stackexchange.com/a/174568
+            shift
+            ;;
+        -d|--debug)
+            DEBUG='true'
+			# info about shift: https://unix.stackexchange.com/a/174568
+            shift
+            ;;
+        -h|--help)
+            echo "$HELP"
+            exit 0
+            ;;
+        -v|--version)
+            echo "$VERSION"
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Programming error"
+            exit 3
+            ;;
+    esac
+done
+
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+NC='\e[0m'
+ERROR='\e[0;31m'
+
+function debug {
+	if [[ "$DEBUG" == "true" ]]; then
+		echo -e "${YELLOW}# $@${NC}"
+	fi
+}
+
+function error {
+	echo -e "${ERROR}[ERROR]${NC} $@"
+}
+
+function success {
+	echo -e "${GREEN}$@${NC}"
+}
+
+COMMAND=${1-default}
+BRANCH_NAME=${2-default}
+EXTRA_ARG=${3-default}
+
+debug "Command: $COMMAND"
+debug "Branch name: $BRANCH_NAME"
+debug "Extra arg: $EXTRA_ARG"
+debug "---"
+
+if [[ "$(git rev-parse --git-dir 2> /dev/null)" != ".git" ]]; then
+	error "Fatal: not a git repository."
+	exit 1
+fi
+
+if [[ "$COMMAND" == "default" ]]; then
+	error "Argument COMMAND can not be empty. Run '$(basename $0) --help' for a list of options."
+	exit 1
+fi
+
+DEF_BRANCH_NAME="main"
+if [[ ! -z $(git branch | grep " master$") ]];then
+	DEF_BRANCH_NAME="master"
+fi
+debug "Default branch name: $DEF_BRANCH_NAME"
+
+CURR_BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+debug "Current branch name: $CURR_BRANCH_NAME"
+
+if [[ "$CURR_BRANCH_NAME" == "$DEF_BRANCH_NAME" ]]; then
+	CURR_BRANCH_TYPE='default'
+elif [[ "$CURR_BRANCH_NAME" == *"/$DEF_BRANCH_NAME" ]]; then
+	CURR_BRANCH_TYPE='feature'
+	FEATURE_NAME=$(echo "$CURR_BRANCH_NAME" | sed 's/\/.*//')
+	debug "Feature name: $FEATURE_NAME"
+elif [[ "$CURR_BRANCH_NAME" == *"/"* ]]; then
+	CURR_BRANCH_TYPE='subfeature'
+	FEATURE_NAME=$(echo "$CURR_BRANCH_NAME" | sed 's/\/.*//')
+	debug "Feature name: $FEATURE_NAME"
+else
+	error "Branch type could not be inferred."
+	exit 1
+fi
+debug "Current branch type: $CURR_BRANCH_TYPE"
+debug "---"
+
+debug "Local operations only: $LOCAL_OPS_ONLY"
+REMOTE=$(git remote show)
+REMOTE_IS_SET="true"
+if [[ -z "$REMOTE" ]]; then
+	REMOTE_IS_SET="false"
+fi
+debug "Remote exists: $REMOTE_IS_SET"
+
+RUN_REMOTE_OPERATIONS="false"
+if [[ "$REMOTE_IS_SET" == "true" ]] && [[ "$LOCAL_OPS_ONLY" == "false" ]]; then
+	RUN_REMOTE_OPERATIONS="true"
+fi
+debug "Run remote operations: $RUN_REMOTE_OPERATIONS"
+debug "---"
+
+function run_remote {
+	if [[ "$RUN_REMOTE_OPERATIONS" == "true" ]]; then
+		command="$1"
+		shift
+		"${command}" $@
+	fi
+}
+
+function require_branch_name {
+	if [[ "$BRANCH_NAME" == "default" ]]; then
+		error "Missing argument BRANCH_NAME."
+		exit 1
+	fi
+}
+
+function forbid_branch_name_arg {
+	if [[ "$BRANCH_NAME" != "default" ]]; then
+		error "Unsupported third argument. The command 'end' runs on the current branch."
+		error "The third argument sent was: '$BRANCH_NAME'."
+		exit 1
+	fi
+}
+
+function require_feature_branch {
+	if [[ "$CURR_BRANCH_NAME" != *"/$DEF_BRANCH_NAME" ]]; then
+		error "Current branch is not a feature."
+		exit 1
+	fi
+}
+
+function require_spaceless_branch_name {
+	if [[ "$EXTRA_ARG" != "default" ]]; then
+		error "Unsupported fourth argument. Spaces are not allowed in BRANCH_NAME."
+		error "The fourth argument sent was: '$EXTRA_ARG'."
+		exit 1
+	fi
+}
+
+function require_slashless_branch_name {
+	if [[ "$BRANCH_NAME" == *"/"* ]]; then
+		error "Invalid BRANCH_NAME. Slashes are not allowed."
+		error "$@"
+		exit 1
+	fi
+}
+
+function validate_branch_name {
+	# require BRANCH_NAME
+	require_branch_name
+
+	# require BRANCH_NAME to have no spaces
+	require_spaceless_branch_name
+
+	# require BRANCH_NAME to have no forward slashes
+	require_slashless_branch_name $1
+}
+
+# start a new feature standing on default branch
+if [[ "$COMMAND" == "start" ]] && [[ "$CURR_BRANCH_TYPE" == "default" ]]; then
+	validate_branch_name "The suffix '/$DEF_BRANCH_NAME' will be added automatically."
+
+	NEW_FEATURE_BRANCH="$BRANCH_NAME"/"$DEF_BRANCH_NAME"
+	debug "New feature branch name: $NEW_FEATURE_BRANCH"
+
+	# get latest changes
+	run_remote git pull
+	
+	# create and checkout to new branch appending `/$DEF_BRANCH_NAME` to its name
+	git checkout -b "$NEW_FEATURE_BRANCH"
+
+	# upload new branch to origin
+	run_remote git push --set-upstream origin "$NEW_FEATURE_BRANCH"
+
+	success "Feature branch '$NEW_FEATURE_BRANCH' created."
+	exit 0
+fi
+
+# end current feature
+if [[ "$COMMAND" == "end" ]] && [[ "$CURR_BRANCH_TYPE" == "feature" ]]; then
+	# forbid third argument
+	forbid_branch_name_arg
+
+	echo "Ending feature '$CURR_BRANCH_NAME'."
+
+	git checkout "$DEF_BRANCH_NAME"
+
+	# get latest changes
+	run_remote git pull
+
+	# merge changes from $CURR_BRANCH_NAME to $DEF_BRANCH_NAME
+	git merge --no-ff "$CURR_BRANCH_NAME"
+
+	# upload merge to origin
+	run_remote git push
+
+	# delete local feature branch
+	git branch -d "$CURR_BRANCH_NAME"
+
+	# delete remote feature branch
+	run_remote git push origin --delete "$CURR_BRANCH_NAME"
+
+	success "Feature branch '$CURR_BRANCH_NAME' deleted."
+	exit 0
+fi
+
+# start a subfeature from current feature
+if [[ "$COMMAND" == "start" ]] && [[ "$CURR_BRANCH_TYPE" == "feature" ]]; then
+	validate_branch_name "The prefix '$FEATURE_NAME/' will be added automatically."
+
+	SUBFEATURE_NAME="$FEATURE_NAME"/"$BRANCH_NAME"
+	debug "Subfeature name: $SUBFEATURE_NAME"
+	
+	# create and checkout to new branch prepending FEATURE_NAME/
+	git checkout -b "$SUBFEATURE_NAME"
+
+	# upload new branch to origin
+	run_remote git push --set-upstream origin "$SUBFEATURE_NAME"
+
+	success "Subfeature branch '$SUBFEATURE_NAME' created."
+	exit 0
+fi
+
+# end current subfeature
+if [[ "$COMMAND" == "end" ]] && [[ "$CURR_BRANCH_TYPE" == "subfeature" ]]; then
+	FEATURE_BRANCH_NAME="$FEATURE_NAME/$DEF_BRANCH_NAME"
+	debug "Feature branch name: $FEATURE_BRANCH_NAME"
+
+	git checkout "$FEATURE_BRANCH_NAME"
+
+	# get latest changes
+	run_remote git pull
+
+	# merge changes from $CURR_BRANCH_NAME to $FEATURE_BRANCH_NAME
+	git merge --no-ff "$CURR_BRANCH_NAME"
+
+	# upload merge to origin
+	run_remote git push
+
+	# delete local subfeature branch
+	git branch -d "$CURR_BRANCH_NAME"
+
+	# delete remote subfeature branch
+	run_remote git push origin --delete "$CURR_BRANCH_NAME"
+
+	success "Subfeature '$CURR_BRANCH_NAME' deleted."
+	exit 0
+fi
+
+if [[ "$COMMAND" == "start" ]] && [[ "$CURR_BRANCH_TYPE" == "subfeature" ]]; then
+	error "Subfeatures can not be started from another subfeature."
+	error "Current branch is '$CURR_BRANCH_NAME'."
+	exit 1
+fi
+
+if [[ "$COMMAND" == "end" ]] && [[ "$CURR_BRANCH_TYPE" == "default" ]]; then
+	error "Default branch can not be ended."
+	exit 1
+fi
+
+# TODO: implement $COMMAND `update`

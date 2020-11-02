@@ -31,7 +31,7 @@ eval set -- "$PARSED"
 
 LOCAL_OPS_ONLY='false'
 DEBUG='false'
-VERSION="v0.1.0"
+VERSION="v0.1.1"
 HELP="
 Usage: $(basename $0) [OPTION] [COMMAND] [<branch name>]
    or: $(basename $0) [OPTION] [COMMAND]
@@ -332,4 +332,25 @@ if [[ "$COMMAND" == "end" ]] && [[ "$CURR_BRANCH_TYPE" == "default" ]]; then
 	exit 1
 fi
 
-# TODO: implement $COMMAND `update`
+# get changes from default branch to current feature
+if [[ "$COMMAND" == "update" ]] && [[ "$CURR_BRANCH_TYPE" == "feature" ]]; then
+	debug "Will merge changes from default branch to: $CURR_BRANCH_NAME"
+	
+	# Download default branch changes and merge into local default branch
+	# without checking-out. This *does* update the local default branch.
+	# More info: https://stackoverflow.com/a/17722977/3622350
+	run_remote git fetch origin +"$DEF_BRANCH_NAME":"$DEF_BRANCH_NAME"
+
+	git merge --no-ff "$DEF_BRANCH_NAME"
+	
+	# upload changes
+	run_remote git push
+
+	success "Feature branch '$CURR_BRANCH_NAME' updated."
+	exit 0
+fi
+
+# TODO: implement $COMMAND `update` for subfeatures
+
+# TODO: add error on unrecognized or empty $COMMAND
+# TODO: what happens when user writes `lsgit -o`?
